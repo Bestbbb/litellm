@@ -153,7 +153,7 @@ def _endpoint(**overrides: object) -> NativeDatabaseEndpoint:
     ],
 )
 def test_native_endpoint_reads_the_prisma_url(url: str, tls_offered: bool, expected: NativeDatabaseEndpoint) -> None:
-    settings: Final = native_endpoint(url, tls_offered=tls_offered)
+    settings: Final = native_endpoint(url, tls_offered=tls_offered, max_connections=2)
 
     assert settings.endpoint == expected
     assert settings.ignored_options == ()
@@ -170,7 +170,7 @@ def test_native_endpoint_reads_the_prisma_url(url: str, tls_offered: bool, expec
 def test_native_endpoint_reports_options_it_cannot_send_instead_of_failing(
     options: str, expected_options: tuple[tuple[str, str], ...], expected_ignored: tuple[str, ...]
 ) -> None:
-    settings: Final = native_endpoint(f"postgresql://u@db/proxy?options={options}", tls_offered=True)
+    settings: Final = native_endpoint(f"postgresql://u@db/proxy?options={options}", tls_offered=True, max_connections=2)
 
     assert settings.endpoint["options"] == expected_options
     assert settings.ignored_options == expected_ignored
@@ -178,7 +178,7 @@ def test_native_endpoint_reports_options_it_cannot_send_instead_of_failing(
 
 def test_native_endpoint_rejects_a_url_without_a_user() -> None:
     with pytest.raises(ValueError, match="DATABASE_URL must name a host and a user"):
-        native_endpoint("postgresql://db.internal/proxy", tls_offered=True)
+        native_endpoint("postgresql://db.internal/proxy", tls_offered=True, max_connections=2)
 
 
 def _identity(password: bytes) -> tuple[bytes, ec.EllipticCurvePrivateKey, x509.Certificate]:
@@ -207,6 +207,7 @@ def test_native_endpoint_hands_over_the_pkcs12_identity_as_pem() -> None:
     identity: Final = native_endpoint(
         "postgresql://u@db/proxy?sslmode=require&sslidentity=/certs/client.p12&sslpassword=s3cret",
         tls_offered=True,
+        max_connections=2,
         read_file=read.__getitem__,
     ).endpoint["ssl_client"]
 
@@ -222,6 +223,7 @@ def test_native_endpoint_rejects_a_wrong_pkcs12_password() -> None:
         native_endpoint(
             "postgresql://u@db/proxy?sslidentity=/certs/client.p12&sslpassword=wrong",
             tls_offered=True,
+            max_connections=2,
             read_file=lambda _path: bundle,
         )
 

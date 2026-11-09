@@ -24,6 +24,13 @@ SQLX_OFFLINE=false cargo sqlx prepare
 
 Tests use transactions and leave them uncommitted so fixture rows roll back when each test finishes
 
+# Boundary with the hosts
+
+The Python gateway and the Rust gateway both host this crate during the migration, so it takes only what both can hand it:
+
+- Pool size is a plain `max_connections`. How a worker's `connection_limit` is split between Prisma and SQLx is decided by the Python host (`litellm/proxy/db/connection_budget.py`) and disappears with Prisma. Never add budget or Prisma knowledge here
+- Credentials arrive as a password (`set_writer_password`). Each process runs one token refresh loop owned by its host, so this crate never mints or refreshes a token on its own. When the Rust gateway needs IAM or Entra tokens, the minting logic moves here as a function the host's loop calls, and the Python loop switches to it, so the resolution logic exists once
+
 # Parity with the Python Prisma stack
 
 Python and SQLx run side by side until every repository operation is native, so the SQLx pool must honor every database setting Python honors. `Endpoint` is resolved in Python from the final `DATABASE_URL` (`litellm/proxy/db/native_database.py`); Rust never reads `DATABASE_*` env vars or parses a Prisma URL. When `litellm/proxy/db/` gains a setting or behavior, add it here
@@ -34,7 +41,7 @@ Python and SQLx run side by side until every repository operation is native, so 
 | `host` Unix socket directory | URL param | `Endpoint::socket` |
 | `sslmode`, `sslaccept=strict`, `sslcert` | `db_url_settings.py` | `strict` is `verify-full` with `sslcert` as the root; without it nothing is verified, so `sslcert` is dropped. `prefer` + `strict` asks the server once at startup and pins `verify-full` or `disable` |
 | `sslidentity`, `sslpassword` | URL params | Python opens the PKCS#12 file and hands the client certificate and key over as PEM |
-| `connection_limit` | `proxy_cli.py`, `prisma_connection_share` | Split, not added: Prisma gets `connection_limit - NATIVE_CONNECTION_SHARE` and the native pool gets the share (2), so an upgrade never grows the budget. Prisma connections are tagged `application_name=litellm-prisma` and native ones `litellm-native` |
+| `connection_limit` | `proxy_cli.py`, `connection_budget.py` | Split, not added: `ConnectionBudget.split` gives the Rust pool its reserve (2, fewer on a tiny limit) and Prisma the rest, so an upgrade never grows the budget. Prisma connections are tagged `application_name=litellm-prisma` and native ones `litellm-native` |
 | `pool_timeout`, `max_idle_connection_lifetime` | `proxy_cli.py`, `db_url_settings.py` | `PoolLimits`, with Prisma's 10s default. `pool_timeout=0` waits forever |
 | `socket_timeout` | `proxy_cli.py` | `PoolLimits::socket_timeout_seconds`, a deadline on each native operation |
 | `connect_timeout` | `proxy_cli.py` | Not carried over: SQLx has no per-connect timeout, so a black-holed connect fails at `pool_timeout` |
@@ -44,7 +51,7 @@ Python and SQLx run side by side until every repository operation is native, so 
 | `application_name` | URL param | A value the operator set is used on both pools; Prisma's `litellm-prisma` default becomes `litellm-native` |
 | Rotating RDS IAM / Entra token | `token_auth.py`, `PrismaWrapper` | Python mints, `NativeDatabase.set_writer_password` swaps connect options |
 | In-container PgBouncer | `pgbouncer.py` | Inherited: the pooled URL carries PgBouncer's credential |
-| Startup connection budget | `postgres_connection_budget_message` | Counts the native writer pool's share |
+| Startup connection budget | `postgres_connection_budget_message` | Counts the Rust writer pool's share |
 | Read replica routing | `routing_prisma_wrapper.py` | Planned: optional reader pool with explicit routing |
 | Error classification, `lock_timeout` on rollups | `exception_handler.py`, `rollup_lock_timeout.py` | Planned |
 | `ServiceTypes.DB` events per round trip | `db_span.py`, `log_db_metrics.py` | Planned |

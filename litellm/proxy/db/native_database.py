@@ -4,6 +4,15 @@
 minted, libpq TLS translated to Prisma's dialect, timeouts in ``options``, pool params
 added. Reading that URL keeps one resolver for both pools instead of a second pass over
 the ``DATABASE_*`` env vars.
+
+Credentials follow the host. Each process runs one token refresh loop, owned by whatever
+hosts it, and feeds every client in that process: here the worker's loop re-mints Prisma's
+URL and pushes the same kind of token into the Rust pool through ``set_writer_password``.
+The Rust core only accepts a password and never mints one, so a Rust gateway process
+brings its own loop. Two processes minting at once is fine, since IAM and Entra tokens
+are independent. What must not exist twice is the logic that resolves region, endpoint
+and user, so when the Rust gateway needs it, it moves into the Rust core and this
+loop calls it.
 """
 
 import asyncio
@@ -20,7 +29,7 @@ from typing import Final, Protocol
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, pkcs12
 
 from litellm._logging import verbose_proxy_logger
-from litellm.proxy.db.db_url_settings import NATIVE_APPLICATION_NAME, NATIVE_CONNECTION_SHARE, PRISMA_APPLICATION_NAME
+from litellm.proxy.db.db_url_settings import NATIVE_APPLICATION_NAME, PRISMA_APPLICATION_NAME
 from litellm.proxy.db.pgbouncer import database_url_is_pooled, fold_libpq_option_tokens, libpq_option_setting
 from litellm.proxy.db.token_auth import (
     DEFAULT_POSTGRES_PORT,
@@ -151,13 +160,14 @@ def native_endpoint(
     url: str,
     *,
     tls_offered: bool,
+    max_connections: int,
     read_file: Callable[[Path], bytes] = Path.read_bytes,
 ) -> NativeEndpointSettings:
     """The native pool's endpoint for the Prisma URL ``url``, read the way Prisma reads it.
 
-    ``host`` is Prisma's Unix socket directory. The pool takes ``NATIVE_CONNECTION_SHARE``
-    connections, the part of ``connection_limit`` the CLI held back from Prisma, and tags
-    them ``NATIVE_APPLICATION_NAME``. An unset ``pool_timeout`` takes Prisma's default and
+    ``host`` is Prisma's Unix socket directory. The pool takes ``max_connections``, the
+    Rust share of the budget (``connection_budget``), and tags its connections
+    ``NATIVE_APPLICATION_NAME``. An unset ``pool_timeout`` takes Prisma's default and
     0 waits forever.
     ``sslidentity`` / ``sslpassword`` are a PKCS#12 client certificate, handed over as PEM.
     ``options`` tokens that are not ``-c name=value`` settings cannot be sent by SQLx and
@@ -185,7 +195,7 @@ def native_endpoint(
             options=options,
             statement_cache_capacity=_statement_cache_capacity(params),
             pool=NativePoolLimits(
-                max_connections=NATIVE_CONNECTION_SHARE,
+                max_connections=max_connections,
                 acquire_timeout_seconds=_seconds(params, "pool_timeout", PRISMA_DEFAULT_POOL_TIMEOUT_SECONDS),
                 idle_timeout_seconds=_seconds(params, "max_idle_connection_lifetime"),
                 socket_timeout_seconds=_seconds(params, "socket_timeout"),
@@ -195,9 +205,9 @@ def native_endpoint(
     )
 
 
-async def resolve_native_endpoint(url: str) -> NativeEndpointSettings:
+async def resolve_native_endpoint(url: str, max_connections: int) -> NativeEndpointSettings:
     tls_offered: Final = await server_offers_tls(url) if needs_tls_probe(url) else True
-    return native_endpoint(url, tls_offered=tls_offered)
+    return native_endpoint(url, tls_offered=tls_offered, max_connections=max_connections)
 
 
 class PasswordSink(Protocol):

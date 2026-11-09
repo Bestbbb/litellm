@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from litellm.proxy.db.connection_budget import RustConnectionLimits
 from litellm.proxy.db.pgbouncer import PGBOUNCER_POOLED_ENV_VAR
 from litellm.repositories.database import Database
 
@@ -24,7 +25,7 @@ def static_password(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.usefixtures("static_password")
 async def test_closing_the_database_closes_prisma() -> None:
     aclose: Final = AsyncMock()
-    database: Final = await Database.open(_prisma(aclose), WRITER_URL)
+    database: Final = await Database.open(_prisma(aclose), WRITER_URL, RustConnectionLimits())
 
     aclose.assert_not_awaited()
     await database.aclose()
@@ -39,7 +40,7 @@ def _task_names(database: Database) -> tuple[str, ...]:
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("static_password")
 async def test_static_password_runs_no_background_task() -> None:
-    database: Final = await Database.open(_prisma(), WRITER_URL)
+    database: Final = await Database.open(_prisma(), WRITER_URL, RustConnectionLimits())
 
     assert _task_names(database) == ()
     await database.aclose()
@@ -50,7 +51,7 @@ async def test_closing_the_database_stops_the_token_refresh(monkeypatch: pytest.
     monkeypatch.setenv("IAM_TOKEN_DB_AUTH", "true")
     monkeypatch.delenv("AZURE_POSTGRESQL_AUTH", raising=False)
     monkeypatch.delenv(PGBOUNCER_POOLED_ENV_VAR, raising=False)
-    database: Final = await Database.open(_prisma(), WRITER_URL)
+    database: Final = await Database.open(_prisma(), WRITER_URL, RustConnectionLimits())
     assert _task_names(database) == ("keep_writer_token_fresh",)
 
     await database.aclose()
@@ -64,6 +65,6 @@ async def test_rejected_native_settings_still_close_prisma() -> None:
     aclose: Final = AsyncMock()
 
     with pytest.raises(ValueError, match="must name a host and a user"):
-        await Database.open(_prisma(aclose), "postgresql://db.invalid/proxy")
+        await Database.open(_prisma(aclose), "postgresql://db.invalid/proxy", RustConnectionLimits())
 
     aclose.assert_awaited_once()

@@ -3649,7 +3649,12 @@ class TestPostgresStatementTimeoutOptions:
         return _run_server_and_capture_urls(config_path, database_url=database_url)["DATABASE_URL"]
 
 
-_CAPTURED_DB_ENV_VARS = ("DATABASE_URL", "DIRECT_URL", "DATABASE_URL_READ_REPLICA")
+_CAPTURED_DB_ENV_VARS = (
+    "DATABASE_URL",
+    "DIRECT_URL",
+    "DATABASE_URL_READ_REPLICA",
+    "LITELLM_DATABASE_RUST_WRITER_CONNECTION_LIMIT",
+)
 
 
 def _run_server_and_capture_urls(
@@ -3700,13 +3705,14 @@ _CAPTURED_URLS: Final = TypeAdapter(dict[str, str])
 
 
 @pytest.mark.parametrize(
-    "general_settings, database_url, expected_limit, expected_name, expected_direct_limit",
+    "general_settings, database_url, expected_prisma, expected_rust, expected_name, expected_total",
     [
-        pytest.param({}, "postgresql://t:t@localhost:5432/t", "8", "litellm-prisma", "10", id="default_ten_splits"),
+        pytest.param({}, "postgresql://t:t@localhost:5432/t", "8", "2", "litellm-prisma", "10", id="default_ten_splits"),
         pytest.param(
             {"database_connection_pool_limit": 30},
             "postgresql://t:t@localhost:5432/t?application_name=ops",
             "28",
+            "2",
             "ops",
             "30",
             id="configured_limit_and_operator_name",
@@ -3715,19 +3721,30 @@ _CAPTURED_URLS: Final = TypeAdapter(dict[str, str])
             {"database_extra_connection_params": {"connection_limit": 5}},
             "postgresql://t:t@localhost:5432/t",
             "3",
+            "2",
             "litellm-prisma",
             "5",
             id="extra_params_override_splits",
         ),
+        pytest.param(
+            {"database_connection_pool_limit": 2},
+            "postgresql://t:t@localhost:5432/t",
+            "1",
+            "1",
+            "litellm-prisma",
+            "2",
+            id="small_limit_stays_within_budget",
+        ),
     ],
 )
-def test_prisma_keeps_the_connection_limit_minus_the_native_share(
+def test_prisma_and_rust_pools_split_the_connection_limit(
     tmp_path: Path,
     general_settings: dict[str, object],
     database_url: str,
-    expected_limit: str,
+    expected_prisma: str,
+    expected_rust: str,
     expected_name: str,
-    expected_direct_limit: str,
+    expected_total: str,
 ) -> None:
     config_path: Final = tmp_path / "config.yaml"
     config_path.write_text(yaml.dump({"model_list": [], "general_settings": general_settings}))
@@ -3740,8 +3757,9 @@ def test_prisma_keeps_the_connection_limit_minus_the_native_share(
 
     writer: Final = urlparse.parse_qs(urlparse.urlparse(captured["DATABASE_URL"]).query)
     direct: Final = urlparse.parse_qs(urlparse.urlparse(captured["DIRECT_URL"]).query)
-    assert (writer["connection_limit"], writer["application_name"]) == ([expected_limit], [expected_name])
-    assert direct["connection_limit"] == [expected_direct_limit]
+    assert (writer["connection_limit"], writer["application_name"]) == ([expected_prisma], [expected_name])
+    assert captured["LITELLM_DATABASE_RUST_WRITER_CONNECTION_LIMIT"] == expected_rust
+    assert direct["connection_limit"] == [expected_total]
 
 
 class TestReadReplicaConnectionParams:
@@ -3831,7 +3849,7 @@ class TestReadReplicaConnectionParams:
         )
 
         assert (
-            "1 worker(s) x (writer connection_limit 1 + native writer pool 2 + reader connection_limit 50) = up to 53 connections"
+            "1 worker(s) x (writer connection_limit 1 + rust writer pool 2 + reader connection_limit 50) = up to 53 connections"
             in capsys.readouterr().out
         )
 
@@ -3852,7 +3870,7 @@ class TestReadReplicaConnectionParams:
             extra_args=("--run_hypercorn", "--num_workers", "4"),
         )
 
-        assert "1 worker(s) x (writer connection_limit 1 + native writer pool 2) = up to 3 connections" in capsys.readouterr().out
+        assert "1 worker(s) x (writer connection_limit 1 + rust writer pool 2) = up to 3 connections" in capsys.readouterr().out
 
     def test_extra_connection_params_never_carry_a_schema_override_to_the_reader(self, tmp_path):
         """database_extra_connection_params is an untyped passthrough, so it can carry a

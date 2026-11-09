@@ -18,7 +18,7 @@ import click
 import httpx
 from click.core import ParameterSource
 from dotenv import load_dotenv
-from pydantic import BeforeValidator, ConfigDict, TypeAdapter
+from pydantic import BeforeValidator, ConfigDict, PositiveInt, TypeAdapter
 from typing_extensions import ReadOnly, TypedDict
 
 import litellm
@@ -1525,13 +1525,13 @@ def run_server(
             db_connection_timeout = LiteLLMDatabaseConnectionPool.database_connection_pool_timeout.value
 
         if os.getenv("DATABASE_URL", None) is not None or os.getenv("DIRECT_URL", None) is not None:
+            from litellm.proxy.db.connection_budget import RUST_WRITER_CONNECTION_LIMIT_ENV_VAR, ConnectionBudget
             from litellm.proxy.db.db_url_settings import (
                 DISABLE_PREPARED_STATEMENTS_ENV_VAR,
                 PRISMA_APPLICATION_NAME,
                 add_missing_query_params,
                 idle_lifetime_params,
                 postgres_connection_budget_message,
-                prisma_connection_share,
                 reader_shareable_params,
                 translate_libpq_ssl_params,
                 unsupported_db_scheme,
@@ -1566,11 +1566,12 @@ def run_server(
                 disable_prepared_statements=disable_prepared_statements,
                 extra_params=db_extra_connection_params,
             )
+            writer_budget: Final = ConnectionBudget.split(
+                TypeAdapter(PositiveInt).validate_python(connection_url_params["connection_limit"])
+            )
+            os.environ[RUST_WRITER_CONNECTION_LIMIT_ENV_VAR] = str(writer_budget.rust)
             prisma_url_params: Final = MappingProxyType(
-                {
-                    **connection_url_params,
-                    "connection_limit": prisma_connection_share(int(connection_url_params["connection_limit"])),
-                }
+                {**connection_url_params, "connection_limit": writer_budget.python}
             )
             lifetime_params: Final = idle_lifetime_params(general_settings.get("database_max_idle_connection_lifetime"))
             prisma_default_params: Final = MappingProxyType(
@@ -1631,6 +1632,7 @@ def run_server(
                 postgres_connection_budget_message(
                     writer_limit=_url_query_value(os.getenv("DATABASE_URL"), "connection_limit")
                     or f"{db_connection_pool_limit}",
+                    rust_writer_limit=writer_budget.rust,
                     reader_limit=(
                         _url_query_value(os.getenv("DATABASE_URL_READ_REPLICA"), "connection_limit")
                         or f"{db_connection_pool_limit}"

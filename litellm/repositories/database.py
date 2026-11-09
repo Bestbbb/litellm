@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from litellm._logging import verbose_proxy_logger
+from litellm.proxy.db.connection_budget import RustConnectionLimits
 from litellm.proxy.db.native_database import (
     keep_writer_token_fresh,
     resolve_native_endpoint,
@@ -24,9 +25,9 @@ class Database:
     tasks: "tuple[asyncio.Task[None], ...]"
 
     @classmethod
-    async def open(cls, prisma: "PrismaClient", writer_url: str) -> "Database":
+    async def open(cls, prisma: "PrismaClient", writer_url: str, rust_limits: RustConnectionLimits) -> "Database":
         try:
-            settings: Final = await resolve_native_endpoint(writer_url)
+            settings: Final = await resolve_native_endpoint(writer_url, rust_limits.writer_connection_limit)
             native: Final = await NativeDatabase.connect(settings.endpoint)
         except BaseException:
             await prisma.aclose()
