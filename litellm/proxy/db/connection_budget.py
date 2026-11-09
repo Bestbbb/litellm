@@ -26,6 +26,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 RUST_RESERVED_CONNECTIONS: Final = 2
 RUST_CONNECTION_LIMIT_ENV_PREFIX: Final = "LITELLM_DATABASE_RUST_"
 RUST_WRITER_CONNECTION_LIMIT_ENV_VAR: Final = f"{RUST_CONNECTION_LIMIT_ENV_PREFIX}WRITER_CONNECTION_LIMIT"
+RUST_READER_CONNECTION_LIMIT_ENV_VAR: Final = f"{RUST_CONNECTION_LIMIT_ENV_PREFIX}READER_CONNECTION_LIMIT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,3 +52,4 @@ class RustConnectionLimits(BaseSettings):
     model_config = SettingsConfigDict(env_prefix=RUST_CONNECTION_LIMIT_ENV_PREFIX, extra="ignore", frozen=True)
 
     writer_connection_limit: PositiveInt = RUST_RESERVED_CONNECTIONS
+    reader_connection_limit: PositiveInt = RUST_RESERVED_CONNECTIONS

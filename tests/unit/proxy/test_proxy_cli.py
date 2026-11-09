@@ -3654,6 +3654,7 @@ _CAPTURED_DB_ENV_VARS = (
     "DIRECT_URL",
     "DATABASE_URL_READ_REPLICA",
     "LITELLM_DATABASE_RUST_WRITER_CONNECTION_LIMIT",
+    "LITELLM_DATABASE_RUST_READER_CONNECTION_LIMIT",
 )
 
 
@@ -3832,7 +3833,8 @@ class TestReadReplicaConnectionParams:
 
     def test_operator_pinned_replica_params_win(self, tmp_path):
         """The documented workaround (params pinned on the replica URL) must keep
-        working, so an operator who tuned the reader separately is not overridden.
+        working, so an operator who tuned the reader separately is not overridden. A pinned
+        connection_limit is the reader's whole budget, shared with the Rust reader pool.
         """
         import yaml
 
@@ -3855,7 +3857,7 @@ class TestReadReplicaConnectionParams:
         )
 
         query = urlparse.parse_qs(urlparse.urlparse(captured["DATABASE_URL_READ_REPLICA"]).query)
-        assert query["connection_limit"] == ["50"]
+        assert int(query["connection_limit"][0]) + int(captured["LITELLM_DATABASE_RUST_READER_CONNECTION_LIMIT"]) == 50
         assert query["pool_timeout"] == ["20"]
 
     def test_connection_budget_line_counts_the_limits_the_final_urls_carry(
@@ -3876,7 +3878,7 @@ class TestReadReplicaConnectionParams:
         )
 
         assert (
-            "1 worker(s) x (writer connection_limit 1 + rust writer pool 2 + reader connection_limit 50) = up to 53 connections"
+            "1 worker(s) x (writer connection_limit 1 + rust writer pool 2 + reader connection_limit 48 + rust reader pool 2) = up to 53 connections"
             in capsys.readouterr().out
         )
 
