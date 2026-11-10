@@ -1621,7 +1621,8 @@ def run_server(
                 ConnectionBudget.split(
                     TypeAdapter(PositiveInt).validate_python(
                         _url_query_value(read_replica_url, "connection_limit") or writer_budget.total
-                    )
+                    ),
+                    rust_reserved=rust_reserved.reader_connection_limit,
                 )
                 if read_replica_url
                 else None
