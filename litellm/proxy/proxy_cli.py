@@ -1525,7 +1525,11 @@ def run_server(
             db_connection_timeout = LiteLLMDatabaseConnectionPool.database_connection_pool_timeout.value
 
         if os.getenv("DATABASE_URL", None) is not None or os.getenv("DIRECT_URL", None) is not None:
-            from litellm.proxy.db.connection_budget import RUST_WRITER_CONNECTION_LIMIT_ENV_VAR, ConnectionBudget
+            from litellm.proxy.db.connection_budget import (
+                RUST_WRITER_CONNECTION_LIMIT_ENV_VAR,
+                ConnectionBudget,
+                RustConnectionLimits,
+            )
             from litellm.proxy.db.db_url_settings import (
                 DISABLE_PREPARED_STATEMENTS_ENV_VAR,
                 PRISMA_APPLICATION_NAME,
@@ -1566,8 +1570,10 @@ def run_server(
                 disable_prepared_statements=disable_prepared_statements,
                 extra_params=db_extra_connection_params,
             )
+            rust_reserved: Final = RustConnectionLimits()
             writer_budget: Final = ConnectionBudget.split(
-                TypeAdapter(PositiveInt).validate_python(connection_url_params["connection_limit"])
+                TypeAdapter(PositiveInt).validate_python(connection_url_params["connection_limit"]),
+                rust_reserved=rust_reserved.writer_connection_limit,
             )
             os.environ[RUST_WRITER_CONNECTION_LIMIT_ENV_VAR] = str(writer_budget.rust)
             prisma_url_params: Final = MappingProxyType(

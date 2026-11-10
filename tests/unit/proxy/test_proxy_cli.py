@@ -3663,6 +3663,7 @@ def _run_server_and_capture_urls(
     direct_url: str | None = None,
     read_replica_url: str | None = None,
     extra_args: tuple[str, ...] = (),
+    rust_writer_connection_limit: str | None = None,
 ) -> dict:
     loaded_config = yaml.safe_load(Path(config_path).read_text())
     mock_proxy_config = MagicMock()
@@ -3679,6 +3680,8 @@ def _run_server_and_capture_urls(
         clean_env["DIRECT_URL"] = direct_url
     if read_replica_url is not None:
         clean_env["DATABASE_URL_READ_REPLICA"] = read_replica_url
+    if rust_writer_connection_limit is not None:
+        clean_env["LITELLM_DATABASE_RUST_WRITER_CONNECTION_LIMIT"] = rust_writer_connection_limit
 
     with (
         patch.dict(os.environ, clean_env, clear=True),
@@ -3760,6 +3763,30 @@ def test_prisma_and_rust_pools_split_the_connection_limit(
     assert (writer["connection_limit"], writer["application_name"]) == ([expected_prisma], [expected_name])
     assert captured["LITELLM_DATABASE_RUST_WRITER_CONNECTION_LIMIT"] == expected_rust
     assert direct["connection_limit"] == [expected_total]
+
+
+@pytest.mark.parametrize(
+    "pool_limit, requested, expected_prisma, expected_rust",
+    [(10, "4", "6", "4"), (3, "9", "1", "2")],
+    ids=["share_moved_to_rust", "clamped_so_prisma_keeps_one"],
+)
+def test_operator_set_rust_share_is_carved_out_of_the_connection_limit(
+    tmp_path: Path, pool_limit: int, requested: str, expected_prisma: str, expected_rust: str
+) -> None:
+    config_path: Final = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.dump({"model_list": [], "general_settings": {"database_connection_pool_limit": pool_limit}})
+    )
+
+    captured: Final = _CAPTURED_URLS.validate_python(
+        _run_server_and_capture_urls(str(config_path), rust_writer_connection_limit=requested)
+    )
+
+    writer: Final = urlparse.parse_qs(urlparse.urlparse(captured["DATABASE_URL"]).query)
+    assert (writer["connection_limit"], captured["LITELLM_DATABASE_RUST_WRITER_CONNECTION_LIMIT"]) == (
+        [expected_prisma],
+        expected_rust,
+    )
 
 
 class TestReadReplicaConnectionParams:

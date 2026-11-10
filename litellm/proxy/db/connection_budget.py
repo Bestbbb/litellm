@@ -6,6 +6,9 @@ queries next to ported ones. These invariants hold until Prisma is gone:
 - Operators set one `connection_limit` per pool (`database_connection_pool_limit`, a URL pin or
   `database_extra_connection_params`). The Rust share is carved out of it, never added on top, so a Rust
   pool does not grow the connection budget.
+- The Rust share defaults to `RUST_RESERVED_CONNECTIONS`. An operator moves connections from Prisma to the
+  Rust pool by setting `LITELLM_DATABASE_RUST_WRITER_CONNECTION_LIMIT` before startup, and `proxy_cli`
+  clamps it so Prisma keeps at least one.
 - The split is Python's. It is about Prisma and Prisma lives only in the Python gateway, so this module is
   deleted with Prisma. The process that starts the workers (`proxy_cli`) decides it once and hands each
   worker plain numbers.
@@ -39,7 +42,8 @@ class ConnectionBudget:
 
 
 class RustConnectionLimits(BaseSettings):
-    """The Rust pools' shares, handed from `proxy_cli` to each worker through the env.
+    """The Rust pools' shares: what the operator asked for when `proxy_cli` reads it, and what `proxy_cli`
+    granted when a worker does.
 
     An entrypoint that skips `proxy_cli` leaves Prisma's limit unsplit and the Rust pool at its reserve.
     """
