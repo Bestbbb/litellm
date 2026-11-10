@@ -10,7 +10,8 @@ pub enum Error {
     InvalidDuration(#[from] std::time::TryFromFloatSecsError),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum ErrorKind {
     Unreachable,
     Capacity,
