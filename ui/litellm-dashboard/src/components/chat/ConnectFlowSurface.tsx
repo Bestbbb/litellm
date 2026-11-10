@@ -13,6 +13,17 @@ interface Props {
   onChange: (servers: string[]) => void;
 }
 
+const picksKey = (flow: string) => `litellm-connect-picks:${flow}`;
+
+const storedPicks = (flow: string): string[] | null => {
+  try {
+    const stored: unknown = JSON.parse(sessionStorage.getItem(picksKey(flow)) ?? "null");
+    return Array.isArray(stored) ? stored.filter((name): name is string => typeof name === "string") : null;
+  } catch {
+    return null;
+  }
+};
+
 /** Renders the sealed gateway connect flow without trusting URL context. */
 const ConnectFlowSurface: React.FC<Props> = ({ accessToken, selectedServers, onChange }) => {
   const router = useRouter();
@@ -36,6 +47,18 @@ const ConnectFlowSurface: React.FC<Props> = ({ accessToken, selectedServers, onC
   };
   const { data: flow, isError, refetch } = useQuery(flowQuery);
 
+  useEffect(() => {
+    const stored = connectFlow ? storedPicks(connectFlow) : null;
+    if (stored) onChange(stored);
+  }, [connectFlow, onChange]);
+
+  const rememberPicks = (servers: string[]) => {
+    try {
+      if (connectFlow) sessionStorage.setItem(picksKey(connectFlow), JSON.stringify(servers));
+    } catch {}
+    onChange(servers);
+  };
+
   if (connectFlow === null) {
     return <MCPAppsPanel accessToken={accessToken} selectedServers={selectedServers} onChange={onChange} />;
   }
@@ -48,9 +71,15 @@ const ConnectFlowSurface: React.FC<Props> = ({ accessToken, selectedServers, onC
         accessToken={accessToken}
         onConnected={refetch}
         failed={isError}
+        selectedServers={selectedServers}
       />
       {flow?.state === "unscoped" && (
-        <MCPAppsPanel accessToken={accessToken} selectedServers={selectedServers} onChange={onChange} connectMode />
+        <MCPAppsPanel
+          accessToken={accessToken}
+          selectedServers={selectedServers}
+          onChange={rememberPicks}
+          connectMode
+        />
       )}
     </>
   );
