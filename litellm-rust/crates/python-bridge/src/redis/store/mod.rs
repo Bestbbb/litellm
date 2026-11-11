@@ -1,4 +1,5 @@
 pub(crate) mod auth_cache;
+pub(crate) mod auth_cache_invalidation;
 mod policy;
 pub(crate) mod rate_limits;
 pub(crate) mod request;

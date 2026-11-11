@@ -1,4 +1,5 @@
 pub mod auth_cache;
+pub mod auth_cache_invalidation;
 mod codec;
 mod dual_cache;
 mod error;

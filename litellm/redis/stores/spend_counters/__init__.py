@@ -31,6 +31,7 @@ from litellm.redis.stores.spend_counters.types import (
     team_window_counter,
     user_counter,
 )
+from litellm.rust_bridge._native import NativeSpendCounters
 
 if TYPE_CHECKING:
     from litellm.redis.stores.connection import RedisStores
@@ -80,6 +81,11 @@ class SpendCounterStore:
     def redis_ttl(self) -> float | None:
         """The TTL every Redis write gives a counter, None when there is no Redis."""
         return self._handle.redis_ttl_seconds
+
+    @property
+    def native(self) -> NativeSpendCounters | None:
+        """The native store behind this one, which the native invalidation channel applies broadcasts to."""
+        return self._handle if isinstance(self._handle, NativeSpendCounters) else None
 
     @property
     def has_redis(self) -> bool:
@@ -163,16 +169,3 @@ class SpendCounterStore:
 
     def snapshot(self) -> Mapping[str, float]:
         return self._handle.snapshot()
-
-    def apply_broadcast(self, cache_key: str, new_value: float | None, ttl: float | None) -> None:
-        """A cross-worker auth cache invalidation: a SET writes this worker's copy, a delete drops it. Keys outside
-        the spend counter keyspace are not this store's."""
-        if not cache_key.startswith(SPEND_COUNTER_PREFIX):
-            return
-        try:
-            if new_value is None:
-                self.delete_local(cache_key)
-            else:
-                self.set_local(cache_key, new_value, ttl)
-        except ValueError:
-            return
