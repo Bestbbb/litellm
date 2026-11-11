@@ -49,7 +49,7 @@ mod _native {
     #[pymodule_export]
     use crate::redis::client::NativeRedisClient;
     #[pymodule_export]
-    use crate::redis::store::auth_cache::{NativeAuthCache, PyLocalSizes};
+    use crate::redis::store::auth_cache::{NativeAuthCache, PyAuthObject, PyLocalSizes};
     #[pymodule_export]
     use crate::redis::store::rate_limits::{
         NativeRateLimits, PyAtomicApplied, PyAtomicOverLimit, PyGaugeOverLimit, PyGaugesAcquired,
@@ -151,6 +151,7 @@ mod tests {
                 "NativeRequestRedis",
                 "NativeSend",
                 "NativeAuthCache",
+                "AuthObject",
                 "NativeRateLimits",
                 "WindowCount",
                 "AtomicApplied",

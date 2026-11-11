@@ -2481,7 +2481,7 @@ async def token_endpoint(
     ):
         from litellm.proxy.proxy_server import (  # noqa: PLC0415  # circular import at module load
             master_key,
-            user_api_key_cache,
+            mcp_state_cache,
         )
 
         return await aggregate_token(
@@ -2494,7 +2494,7 @@ async def token_endpoint(
             refresh_token=refresh_token,
             master_key=master_key,
             reload_user=reload_active_user_by_id,
-            cache=user_api_key_cache,
+            cache=mcp_state_cache,
             resource=resource,
             mint_proxy_credential=mint_proxy_credential,
             subject_token=subject_token,
@@ -2588,13 +2588,13 @@ async def authorize_complete(
     (``delivery=manual``). POST plus the per-flow HttpOnly cookie set at /authorize; an
     anonymous or bad-flow request just 400s. The native-client consent page adds
     ``decision`` (approve or deny) and the ``team_id`` the credential is attributed to."""
-    from litellm.proxy.proxy_server import user_api_key_cache  # noqa: PLC0415  # circular import at module load
+    from litellm.proxy.proxy_server import mcp_state_cache  # noqa: PLC0415  # circular import at module load
 
     return await complete_connect_flow(
         request=request,
         flow_handle=flow,
         session_user_id=await _session_cookie_user_id(request),
-        cache=user_api_key_cache,
+        cache=mcp_state_cache,
         delivery=delivery,
         team_id=team_id,
         decision=decision,
@@ -2610,10 +2610,10 @@ async def revoke_endpoint(request: Request, token: str = Form(...), client_id: s
     access tokens expire on their own."""
     from litellm.proxy.proxy_server import (  # noqa: PLC0415  # circular import at module load
         master_key,
-        user_api_key_cache,
+        mcp_state_cache,
     )
 
-    return await revoke_refresh_token(token=token, client_id=client_id, master_key=master_key, cache=user_api_key_cache)
+    return await revoke_refresh_token(token=token, client_id=client_id, master_key=master_key, cache=mcp_state_cache)
 
 
 @router.post("/introspect", dependencies=[Depends(user_api_key_auth)])
@@ -2625,14 +2625,14 @@ async def introspect_endpoint(token: str = Form(...)) -> Response:
     ``{"active": false}`` with no further detail."""
     from litellm.proxy.proxy_server import (  # noqa: PLC0415  # circular import at module load
         master_key,
-        user_api_key_cache,
+        mcp_state_cache,
     )
 
     return await introspect_gateway_token(
         token=token,
         master_key=master_key,
         reload_user=reload_active_user_by_id,
-        cache=user_api_key_cache,
+        cache=mcp_state_cache,
     )
 
 

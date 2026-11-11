@@ -339,6 +339,7 @@ from litellm._logging import (
     verbose_router_logger,
 )
 from litellm.caching.caching import DualCache, RedisCache
+from litellm.caching.in_memory_cache import InMemoryCache
 from litellm.caching.redis_batch import active_request_redis_batches, drain_post_call_redis_batches
 from litellm.caching.redis_cache import RedisCircuitBreakerOpenError, is_redis_timeout_failure
 from litellm.caching.redis_cluster_cache import RedisClusterCache
@@ -351,9 +352,9 @@ from litellm.constants import (
     CLI_SSO_SESSION_TTL_SECONDS,
     DAYS_IN_A_MONTH,
     DEFAULT_HEALTH_CHECK_INTERVAL,
+    DEFAULT_MANAGEMENT_OBJECT_IN_MEMORY_CACHE_TTL,
     DEFAULT_MAX_LRU_CACHE_SIZE,
     DEFAULT_MODEL_CREATED_AT_TIME,
-    GLOBAL_PROXY_SPEND_CACHE_KEY,
     LITELLM_PROXY_ADMIN_NAME,
     LITELLM_PROXY_BUDGET_NAME,
     MONTHLY_SPEND_REPORT_JOB_ID,
@@ -627,15 +628,7 @@ from litellm.proxy.common_utils.token_count_log import (
     logged_token_count,
     rejected_token_count,
 )
-from litellm.proxy.common_utils.user_api_key_cache import (
-    UserApiKeyCache,
-    budget_windows_absent_cache_key,
-    end_user_cache_key,
-    get_management_object_ttl,
-    model_access_group_cache_key,
-    project_cache_key,
-    tag_cache_key,
-)
+from litellm.proxy.common_utils.user_api_key_cache import UserApiKeyCache, get_management_object_ttl
 from litellm.proxy.common_utils.validation_error_body import public_validation_errors
 from litellm.proxy.config_resolvers import (
     FieldSource,
@@ -899,6 +892,7 @@ from litellm.proxy.telemetry.middleware import TelemetryMiddleware
 from litellm.proxy.telemetry.runtime import TelemetryRuntime
 from litellm.proxy.telemetry.settings import describe_errors as describe_telemetry_errors
 from litellm.proxy.telemetry.settings import load_settings as load_telemetry_settings
+from litellm.redis.stores.auth_cache import AuthObject
 from litellm.redis.stores.connection import connect
 from litellm.redis.stores.spend_counters import (
     SPEND_COUNTERS_TARGET,
@@ -3193,6 +3187,15 @@ shared_aiohttp_session: Optional["ClientSession"] = None  # Global shared sessio
 user_api_key_cache: UserApiKeyCache = UserApiKeyCache(
     default_in_memory_ttl=UserAPIKeyCacheTTLEnum.in_memory_cache_ttl.value
 )
+hook_cache: Final = DualCache(default_in_memory_ttl=UserAPIKeyCacheTTLEnum.in_memory_cache_ttl.value)
+mcp_state_cache: Final = DualCache(default_in_memory_ttl=UserAPIKeyCacheTTLEnum.in_memory_cache_ttl.value)
+jwks_cache: Final = DualCache(default_in_memory_ttl=UserAPIKeyCacheTTLEnum.in_memory_cache_ttl.value)
+ui_settings_cache: Final = DualCache(default_in_memory_ttl=UserAPIKeyCacheTTLEnum.in_memory_cache_ttl.value)
+sso_flow_cache: Final = DualCache(default_in_memory_ttl=UserAPIKeyCacheTTLEnum.in_memory_cache_ttl.value)
+budget_windows_absent_cache: Final = DualCache(
+    in_memory_cache=InMemoryCache(default_ttl=DEFAULT_MANAGEMENT_OBJECT_IN_MEMORY_CACHE_TTL),
+    default_in_memory_ttl=UserAPIKeyCacheTTLEnum.in_memory_cache_ttl.value,
+)
 spend_counter_cache: Final = DualCache(default_in_memory_ttl=UserAPIKeyCacheTTLEnum.in_memory_cache_ttl.value)
 spend_counter_store: Final = SpendCounterStore(connect(None).spend_counters())
 cli_sso_session_cache: Final = DualCache(default_in_memory_ttl=CLI_SSO_SESSION_TTL_SECONDS)
@@ -3273,7 +3276,9 @@ open_telemetry_logger: OpenTelemetry | None = None
 # LiteLLM_DailyGatewayRequests by the update_gateway_requests scheduler job.
 gateway_request_accumulator: Final = GatewayRequestAccumulator()
 ### INITIALIZE GLOBAL LOGGING OBJECT ###
-proxy_logging_obj: ProxyLogging = ProxyLogging(user_api_key_cache=user_api_key_cache, premium_user=premium_user)
+proxy_logging_obj: ProxyLogging = ProxyLogging(
+    user_api_key_cache=user_api_key_cache, hook_cache=hook_cache, premium_user=premium_user
+)
 
 
 def _gateway_request_redis_buffer() -> GatewayRequestRedisBuffer | None:
@@ -3719,25 +3724,29 @@ def _has_budget_windows(budget_limits: object) -> bool:
     return isinstance(budget_limits, list) and budget_limits != []
 
 
+def budget_windows_absent_cache_key(entity_type: str, entity_id: str) -> str:
+    return f"budget_windows_absent:{entity_type}:{entity_id}"
+
+
 def _budget_windows_absent_marker(absent_key: str) -> object:
-    return _UNTYPED_VALUE.validate_python(user_api_key_cache.budget_windows_absent_cache.get_cache(key=absent_key))
+    return _UNTYPED_VALUE.validate_python(budget_windows_absent_cache.get_cache(key=absent_key))
 
 
 def _finish_pending_read(absent_key: str, pending_read: str, remember_absent: bool) -> None:
     if _budget_windows_absent_marker(absent_key) != pending_read:
         return
     if remember_absent:
-        user_api_key_cache.budget_windows_absent_cache.set_cache(key=absent_key, value=True)
+        budget_windows_absent_cache.set_cache(key=absent_key, value=True)
         return
-    user_api_key_cache.budget_windows_absent_cache.delete_cache(absent_key)
+    budget_windows_absent_cache.delete_cache(absent_key)
 
 
 async def accounting_window_keys(token: str | None, team_id: str | None) -> tuple[Mapping[str, object], ...]:
     scopes: Final = tuple(
         (entity_type, entity_id, cache_key)
         for entity_type, entity_id, cache_key in (
-            (Litellm_EntityType.KEY, token, token),
-            (Litellm_EntityType.TEAM, team_id, f"team_id:{team_id}"),
+            (Litellm_EntityType.KEY, token, AuthObject.virtual_key(token) if token is not None else None),
+            (Litellm_EntityType.TEAM, team_id, AuthObject.team(team_id) if team_id is not None else None),
         )
         if entity_id is not None and cache_key is not None
     )
@@ -3753,7 +3762,7 @@ async def accounting_window_keys(token: str | None, team_id: str | None) -> tupl
 
 
 async def _accounting_scope_windows(
-    entity_type: Litellm_EntityType, entity_id: str, cache_key: str
+    entity_type: Litellm_EntityType, entity_id: str, cache_key: AuthObject
 ) -> tuple[Mapping[str, object], ...]:
     from litellm.proxy.spend_tracking.budget_reservation import fixed_budget_window
 
@@ -3784,7 +3793,7 @@ async def _stored_budget_limits(entity_type: Litellm_EntityType, entity_id: str)
     if _budget_windows_absent_marker(absent_key) is True:
         return None
     pending_read: Final = f"reading:{secrets.token_hex(8)}"
-    user_api_key_cache.budget_windows_absent_cache.set_cache(key=absent_key, value=pending_read)
+    budget_windows_absent_cache.set_cache(key=absent_key, value=pending_read)
     try:
         row: Final[SupportsModelDump | None] = (
             await VerificationTokenRepository(prisma_client).table.find_unique(where={"token": entity_id})
@@ -3893,7 +3902,7 @@ async def _increment_spend_counters_batched(
         return tuple(item for item in window_pending if item is not None)
 
     async def _cached_window_increments(
-        entity_type: Litellm_EntityType, entity_id: str, cache_key: str
+        entity_type: Litellm_EntityType, entity_id: str, cache_key: AuthObject
     ) -> tuple[_SpendScopeItem, ...]:
         cached: Final[object] = _UNTYPED_VALUE.validate_python(await user_api_key_cache.async_get_cache(key=cache_key))
         if cached is None:
@@ -3926,13 +3935,15 @@ async def _increment_spend_counters_batched(
             else (
                 await _prepare_spend_counter_increment(
                     counter_key=key_counter_key,
-                    source_cache_key=hashed_token,
+                    source_cache_key=AuthObject.virtual_key(hashed_token),
                     increment=cost,
                 ),
             )
         )
 
-        return key_pending + await _cached_window_increments(Litellm_EntityType.KEY, hashed_token, hashed_token)
+        return key_pending + await _cached_window_increments(
+            Litellm_EntityType.KEY, hashed_token, AuthObject.virtual_key(hashed_token)
+        )
 
     async def _team_scope(scope_team_id: str) -> tuple[_SpendScopeItem, ...]:
         team_counter_key: Final = team_counter(scope_team_id)
@@ -3942,14 +3953,14 @@ async def _increment_spend_counters_batched(
             else (
                 await _prepare_spend_counter_increment(
                     counter_key=team_counter_key,
-                    source_cache_key=f"team_id:{scope_team_id}",
+                    source_cache_key=AuthObject.team(scope_team_id),
                     increment=cost,
                 ),
             )
         )
 
         return team_pending + await _cached_window_increments(
-            Litellm_EntityType.TEAM, scope_team_id, f"team_id:{scope_team_id}"
+            Litellm_EntityType.TEAM, scope_team_id, AuthObject.team(scope_team_id)
         )
 
     async def _team_member_scope(
@@ -3961,7 +3972,7 @@ async def _increment_spend_counters_batched(
         return (
             await _prepare_spend_counter_increment(
                 counter_key=team_member_counter_key,
-                source_cache_key=f"team_membership:{scope_user_id}:{scope_team_id}",
+                source_cache_key=AuthObject.team_membership_reservation(user_id=scope_user_id, team_id=scope_team_id),
                 increment=cost,
             ),
         )
@@ -3973,7 +3984,7 @@ async def _increment_spend_counters_batched(
         return (
             await _prepare_spend_counter_increment(
                 counter_key=user_counter_key,
-                source_cache_key=scope_user_id,
+                source_cache_key=AuthObject.user(scope_user_id),
                 increment=cost,
             ),
         )
@@ -4151,7 +4162,7 @@ async def _prepare_end_user_and_tag_spend_increments(
             for coro in (
                 _prepare_unreserved_spend_counter_increment(
                     counter_key=end_user_counter(end_user_id),
-                    source_cache_key=end_user_cache_key(end_user_id),
+                    source_cache_key=AuthObject.end_user(end_user_id),
                     increment=response_cost,
                     reserved_counter_keys=reserved_counter_keys,
                 )
@@ -4160,7 +4171,7 @@ async def _prepare_end_user_and_tag_spend_increments(
                 *(
                     _prepare_unreserved_spend_counter_increment(
                         counter_key=tag_counter(tag_name),
-                        source_cache_key=tag_cache_key(tag_name),
+                        source_cache_key=AuthObject.tag(tag_name),
                         increment=response_cost,
                         reserved_counter_keys=reserved_counter_keys,
                     )
@@ -4196,7 +4207,7 @@ async def _prepare_model_access_group_spend_increments(
         *(
             _prepare_unreserved_spend_counter_increment(
                 counter_key=model_access_group_counter(group),
-                source_cache_key=model_access_group_cache_key(group),
+                source_cache_key=AuthObject.model_access_group(group),
                 increment=response_cost,
                 reserved_counter_keys=reserved_counter_keys,
             )
@@ -4217,7 +4228,7 @@ async def _prepare_org_spend_increment(
 
     pending: Final = await _prepare_unreserved_spend_counter_increment(
         counter_key=org_counter(org_id),
-        source_cache_key=[f"org_id:{org_id}:with_budget", f"org_id:{org_id}"],
+        source_cache_key=(AuthObject.org_with_budget(org_id), AuthObject.org(org_id)),
         increment=response_cost,
         reserved_counter_keys=reserved_counter_keys,
     )
@@ -4234,7 +4245,7 @@ async def _prepare_project_spend_increment(
 
     pending: Final = await _prepare_unreserved_spend_counter_increment(
         counter_key=project_counter(project_id),
-        source_cache_key=project_cache_key(project_id),
+        source_cache_key=AuthObject.project(project_id),
         increment=response_cost,
         reserved_counter_keys=reserved_counter_keys,
     )
@@ -4243,7 +4254,7 @@ async def _prepare_project_spend_increment(
 
 async def _prepare_unreserved_spend_counter_increment(
     counter_key: str,
-    source_cache_key: str | list[str],
+    source_cache_key: AuthObject | Sequence[AuthObject],
     increment: float,
     reserved_counter_keys: set[str],
 ) -> PendingSpendIncrement | None:
@@ -4259,7 +4270,7 @@ async def _prepare_unreserved_spend_counter_increment(
 
 async def _prepare_spend_counter_increment(
     counter_key: str,
-    source_cache_key: str | list[str],
+    source_cache_key: AuthObject | Sequence[AuthObject],
     increment: float,
 ) -> PendingSpendIncrement:
     """
@@ -4366,7 +4377,7 @@ async def _prepare_window_spend_counter_increment(
 
 async def ensure_spend_counter_initialized(
     counter_key: str,
-    source_cache_key: str | list[str],
+    source_cache_key: AuthObject | Sequence[AuthObject],
 ) -> None:
     is_warm: Final = await _is_spend_counter_cache_warm(counter_key=counter_key)
     if is_warm is False:
@@ -4388,9 +4399,9 @@ _ensure_spend_counter_initialized: Final = ensure_spend_counter_initialized
 
 
 async def _get_source_cache_base_spend(
-    source_cache_key: str | list[str],
+    source_cache_key: AuthObject | Sequence[AuthObject],
 ) -> float:
-    source_cache_keys: Final = [source_cache_key] if isinstance(source_cache_key, str) else source_cache_key
+    source_cache_keys: Final = (source_cache_key,) if isinstance(source_cache_key, AuthObject) else source_cache_key
     for cache_key in source_cache_keys:
         source: object = _UNTYPED_VALUE.validate_python(await user_api_key_cache.async_get_cache(key=cache_key))
         if source is None:
@@ -4593,7 +4604,7 @@ _CachedSpendObjectT = TypeVar(
 
 
 def _add_spend_to_locally_cached_object(
-    cache: UserApiKeyCache, key: str, model_type: type[_CachedSpendObjectT], response_cost: float
+    cache: UserApiKeyCache, key: AuthObject, model_type: type[_CachedSpendObjectT], response_cost: float
 ) -> None:
     current: Final = cache.get_cache(key=key, local_only=True, model_type=model_type)
     if current is None:
@@ -4609,7 +4620,7 @@ def _add_spend_to_locally_cached_object(
 
 async def _add_spend_to_shared_global_proxy_spend(cache: UserApiKeyCache, response_cost: float) -> float | None:
     try:
-        return await cache.increment_if_present(GLOBAL_PROXY_SPEND_CACHE_KEY, response_cost)
+        return await cache.increment_if_present(AuthObject.global_proxy_spend(), response_cost)
     except Exception as e:
         verbose_proxy_logger.warning(
             "Spend tracking - failed to add spend to the global proxy spend in Redis. "
@@ -4622,18 +4633,18 @@ async def _add_spend_to_shared_global_proxy_spend(cache: UserApiKeyCache, respon
 
 async def _add_spend_to_global_proxy_spend(cache: UserApiKeyCache, response_cost: float) -> None:
     local_before: Final = _UNTYPED_VALUE.validate_python(
-        cache.get_cache(key=GLOBAL_PROXY_SPEND_CACHE_KEY, local_only=True)
+        cache.get_cache(key=AuthObject.global_proxy_spend(), local_only=True)
     )
     shared_total: Final = await _add_spend_to_shared_global_proxy_spend(cache, response_cost)
     local_total: Final = _UNTYPED_VALUE.validate_python(
-        cache.get_cache(key=GLOBAL_PROXY_SPEND_CACHE_KEY, local_only=True)
+        cache.get_cache(key=AuthObject.global_proxy_spend(), local_only=True)
     )
     if not isinstance(local_total, (int, float)):
         return
     if shared_total is not None and local_total != local_before and shared_total < local_total:
         return
     cache.set_cache(
-        key=GLOBAL_PROXY_SPEND_CACHE_KEY,
+        key=AuthObject.global_proxy_spend(),
         value=local_total + response_cost if shared_total is None else shared_total,
         local_only=True,
         ttl=get_management_object_ttl(cache),
@@ -4666,7 +4677,9 @@ async def update_cache(
         else:
             hashed_token = token
         verbose_proxy_logger.debug("_update_key_cache: hashed_token=%s", hashed_token)
-        existing_spend_obj = await target.async_get_cache(key=hashed_token, model_type=UserAPIKeyAuth)
+        existing_spend_obj = await target.async_get_cache(
+            key=AuthObject.virtual_key(hashed_token), model_type=UserAPIKeyAuth
+        )
         verbose_proxy_logger.debug("_update_key_cache: existing_spend_obj=%s", existing_spend_obj)
         if existing_spend_obj is None:
             return
@@ -4708,7 +4721,7 @@ async def update_cache(
             )
             # set cooldown on alert
 
-    def _add_spend(key: str, model_type: type[_CachedSpendObjectT], cost: float) -> None:
+    def _add_spend(key: AuthObject, model_type: type[_CachedSpendObjectT], cost: float) -> None:
         try:
             _add_spend_to_locally_cached_object(target, key, model_type, cost)
         except Exception as e:
@@ -4717,7 +4730,7 @@ async def update_cache(
                 "Budget enforcement may use stale spend values. "
                 "key=%s, response_cost=%s - %s\n%s",
                 model_type.__name__,
-                key,
+                key.key,
                 cost,
                 str(e),
                 traceback.format_exc(),
@@ -4730,14 +4743,14 @@ async def update_cache(
         return
 
     if user_id is not None:
-        _add_spend(user_id, LiteLLM_UserTable, response_cost)
+        _add_spend(AuthObject.user(user_id), LiteLLM_UserTable, response_cost)
     if end_user_id is not None:
-        _add_spend(end_user_cache_key(end_user_id), LiteLLM_EndUserTable, response_cost)
+        _add_spend(AuthObject.end_user(end_user_id), LiteLLM_EndUserTable, response_cost)
     if team_id is not None:
-        _add_spend(f"team_id:{team_id}", LiteLLM_TeamTableCachedObj, response_cost)
+        _add_spend(AuthObject.team(team_id), LiteLLM_TeamTableCachedObj, response_cost)
     for tag_name in tags or ():
         if tag_name and isinstance(tag_name, str):
-            _add_spend(tag_cache_key(tag_name), LiteLLM_TagTable, response_cost)
+            _add_spend(AuthObject.tag(tag_name), LiteLLM_TagTable, response_cost)
 
     if litellm.max_budget <= 0:
         return
@@ -5475,10 +5488,9 @@ def _attach_redis_usage_cache(redis_cache: RedisCache, enable_redis_auth_cache: 
         default_redis_ttl=SAML_AUTHN_REQUEST_TTL_SECONDS,
     )
     if enable_redis_auth_cache is True:
-        user_api_key_cache.attach_redis_cache(
-            redis_cache,
-            default_redis_ttl=litellm.default_redis_ttl,
-        )
+        user_api_key_cache.attach_redis_cache(redis_cache)
+        for shared_cache in (hook_cache, mcp_state_cache, jwks_cache, ui_settings_cache):
+            shared_cache.attach_redis_cache(redis_cache, default_redis_ttl=litellm.default_redis_ttl)
         verbose_proxy_logger.info(
             "enable_redis_auth_cache=True: attached Redis to "
             "user_api_key_cache — virtual-key lookups are now "
@@ -7349,14 +7361,7 @@ class ProxyConfig:
             ### USER API KEY CACHE TTL (in-memory + Redis when Redis auth sharing is enabled) ###
             user_api_key_cache_ttl: Final = general_settings.get("user_api_key_cache_ttl", None)
             if user_api_key_cache_ttl is not None:
-                ttl: Final = float(user_api_key_cache_ttl)
-                # Mirror TTL on Redis as well when ``litellm_settings.enable_redis_auth_cache``
-                # attaches Redis to ``user_api_key_cache``; otherwise DualCache misses in
-                # memory fall back to a key that outlasts ``user_api_key_cache_ttl``.
-                user_api_key_cache.update_cache_ttl(
-                    default_in_memory_ttl=ttl,
-                    default_redis_ttl=ttl,
-                )
+                user_api_key_cache.update_cache_ttl(default_in_memory_ttl=float(user_api_key_cache_ttl))
 
             ### USER API KEY CACHE MAX SIZE (in-memory tier shared by keys, teams, users, end users, ...) ###
             if "user_api_key_cache_max_size" in general_settings:
@@ -9116,6 +9121,13 @@ class ProxyConfig:
             redis_cache=redis_cache,
             user_api_key_cache=user_api_key_cache,
             additional_in_memory_caches=(spend_counter_cache.in_memory_cache, byok_credential_cache),
+            evicted_caches=(
+                budget_windows_absent_cache.in_memory_cache,
+                hook_cache.in_memory_cache,
+                mcp_state_cache.in_memory_cache,
+                jwks_cache.in_memory_cache,
+                ui_settings_cache.in_memory_cache,
+            ),
             spend_counters=spend_counter_store,
         )
         self.auth_cache_invalidation_subscriber = subscriber
@@ -11488,6 +11500,7 @@ class ProxyStartupEvent:
         jwt_handler.update_environment(
             prisma_client=prisma_client,
             user_api_key_cache=user_api_key_cache,
+            jwks_cache=jwks_cache,
             litellm_jwtauth=litellm_jwtauth,
         )
         from litellm.proxy.agent_endpoints.agent_registry import global_agent_registry
@@ -11567,9 +11580,8 @@ class ProxyStartupEvent:
     ) -> None:
         """Warm global spend cache once at startup to reduce impact of first wave of requests."""
         try:
-            cache_key: Final = GLOBAL_PROXY_SPEND_CACHE_KEY
             await fetch_global_spend_with_event_coordination(
-                cache_key=cache_key,
+                cache_key=AuthObject.global_proxy_spend(),
                 user_api_key_cache=user_api_key_cache,
                 prisma_client=prisma_client,
             )
@@ -19602,7 +19614,7 @@ async def login(request: Request):
                 return_to=cp_return_to,
                 jwt_token=jwt_token,
                 redis_usage_cache=redis_usage_cache,
-                user_api_key_cache=user_api_key_cache,
+                sso_flow_cache=sso_flow_cache,
                 request=request,
             )
         except Exception:  # noqa: BLE001  # resuming must NEVER block a completed sign-in
@@ -19736,7 +19748,7 @@ async def login_v3(request: Request):
         if redis_usage_cache is not None:
             await redis_usage_cache.async_set_cache(key=cache_key, value=cache_value, ttl=60)
         else:
-            await user_api_key_cache.async_set_cache(key=cache_key, value=cache_value, ttl=60)
+            await sso_flow_cache.async_set_cache(key=cache_key, value=cache_value, ttl=60)
 
         return JSONResponse(
             content={"code": code, "expires_in": 60},
@@ -19790,7 +19802,7 @@ async def login_v3_exchange(request: Request):
         cached_data: Final[object] = _UNTYPED_VALUE.validate_python(
             await redis_usage_cache.async_get_cache(key=cache_key)
             if redis_usage_cache is not None
-            else await user_api_key_cache.async_get_cache(key=cache_key)
+            else await sso_flow_cache.async_get_cache(key=cache_key)
         )
 
         if not cached_data or not isinstance(cached_data, dict):
@@ -19805,7 +19817,7 @@ async def login_v3_exchange(request: Request):
         if redis_usage_cache is not None:
             await redis_usage_cache.async_delete_cache(key=cache_key)
         else:
-            await user_api_key_cache.async_delete_cache(key=cache_key)
+            await sso_flow_cache.async_delete_cache(key=cache_key)
 
         json_response: Final = JSONResponse(
             content={
@@ -22962,11 +22974,11 @@ async def _is_mcp_access_group_cached(name: str) -> bool:
     )
 
     cache_key: Final = f"mcp_access_group_exists:{name}"
-    cached: Final[object] = _UNTYPED_VALUE.validate_python(await user_api_key_cache.async_get_cache(key=cache_key))
+    cached: Final[object] = _UNTYPED_VALUE.validate_python(await mcp_state_cache.async_get_cache(key=cache_key))
     if cached is not None:
         return bool(cached)
     result: Final = bool(await MCPRequestHandler.get_mcp_servers_from_access_groups([name]))
-    await user_api_key_cache.async_set_cache(
+    await mcp_state_cache.async_set_cache(
         key=cache_key,
         value=result,
         ttl=(get_management_object_ttl(user_api_key_cache) if result else DEFAULT_MCP_ACCESS_GROUP_NEGATIVE_CACHE_TTL),

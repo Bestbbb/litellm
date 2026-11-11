@@ -44,19 +44,14 @@ from litellm.proxy.common_utils.timezone_utils import (
     compute_budget_reset_at,
     get_budget_reset_settings,
 )
-from litellm.proxy.common_utils.user_api_key_cache import (
-    AUTH_OBJECTS_TARGET,
-    end_user_cache_key,
-    model_access_group_cache_key,
-    project_cache_key,
-    tag_cache_key,
-)
+from litellm.proxy.common_utils.user_api_key_cache import AUTH_OBJECTS_TARGET
 from litellm.proxy.db.budget_window_spend_writer import roll_window_spend_row
 from litellm.proxy.db.db_span import db_span, db_spanned
 from litellm.proxy.db.db_transaction_queue.pod_lock_manager import POD_LOCK_TARGET, PodLockManager
 from litellm.proxy.db.exception_handler import call_with_db_reconnect_retry
 from litellm.proxy.spend_tracking.committed_spend import committed_spend_keys
 from litellm.proxy.utils import PrismaClient, ProxyLogging
+from litellm.redis.stores.auth_cache import AuthObject
 from litellm.redis.stores.spend_counters import (
     SPEND_COUNTERS_TARGET,
     SpendCounterStore,
@@ -181,7 +176,7 @@ def _team_membership_counter_key(row: _TeamMembershipRow) -> str:
 
 
 def _team_membership_cache_keys(row: _TeamMembershipRow) -> tuple[str, ...]:
-    return (f"{row.team_id}_{row.user_id}",)
+    return (AuthObject.team_membership(team_id=row.team_id, user_id=row.user_id).key,)
 
 
 def _key_counter_key(row: _KeyRow) -> str:
@@ -189,7 +184,7 @@ def _key_counter_key(row: _KeyRow) -> str:
 
 
 def _key_cache_keys(row: _KeyRow) -> tuple[str, ...]:
-    return (row.token,)
+    return (AuthObject.virtual_key(row.token).key,)
 
 
 def _org_counter_key(row: _OrgRow) -> str:
@@ -198,8 +193,8 @@ def _org_counter_key(row: _OrgRow) -> str:
 
 def _org_cache_keys(row: _OrgRow) -> tuple[str, ...]:
     return (
-        f"org_id:{row.organization_id}",
-        f"org_id:{row.organization_id}:with_budget",
+        AuthObject.org(row.organization_id).key,
+        AuthObject.org_with_budget(row.organization_id).key,
     )
 
 
@@ -208,7 +203,7 @@ def _tag_counter_key(row: _TagRow) -> str:
 
 
 def _tag_cache_keys(row: _TagRow) -> tuple[str, ...]:
-    return (tag_cache_key(row.tag_name),)
+    return (AuthObject.tag(row.tag_name).key,)
 
 
 def _model_access_group_counter_key(row: _ModelAccessGroupRow) -> str:
@@ -216,7 +211,7 @@ def _model_access_group_counter_key(row: _ModelAccessGroupRow) -> str:
 
 
 def _model_access_group_cache_keys(row: _ModelAccessGroupRow) -> tuple[str, ...]:
-    return (model_access_group_cache_key(row.access_group_name),)
+    return (AuthObject.model_access_group(row.access_group_name).key,)
 
 
 def _project_counter_key(row: _ProjectRow) -> str:
@@ -224,7 +219,7 @@ def _project_counter_key(row: _ProjectRow) -> str:
 
 
 def _project_cache_keys(row: _ProjectRow) -> tuple[str, ...]:
-    return (project_cache_key(row.project_id),)
+    return (AuthObject.project(row.project_id).key,)
 
 
 def _enduser_counter_key(row: _EndUserRow) -> str:
@@ -232,7 +227,7 @@ def _enduser_counter_key(row: _EndUserRow) -> str:
 
 
 def _enduser_cache_keys(row: _EndUserRow) -> tuple[str, ...]:
-    return (end_user_cache_key(row.user_id),)
+    return (AuthObject.end_user(row.user_id).key,)
 
 
 def _budget_link_where(

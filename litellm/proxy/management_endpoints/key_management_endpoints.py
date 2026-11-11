@@ -85,7 +85,7 @@ from litellm.proxy.common_utils.config_sync_pubsub import (
 from litellm.proxy.common_utils.openai_error_payload import openai_error_param, proxy_exception_for
 from litellm.proxy.common_utils.rbac_utils import check_org_admin_can_generate_keys
 from litellm.proxy.common_utils.timezone_utils import get_budget_reset_time, keeps_due_budget_reset
-from litellm.proxy.common_utils.user_api_key_cache import AUTH_OBJECTS_TARGET, UserApiKeyCache, is_user_key_cache_key
+from litellm.proxy.common_utils.user_api_key_cache import AUTH_OBJECTS_TARGET, UserApiKeyCache
 from litellm.proxy.hooks.key_management_event_hooks import KeyManagementEventHooks
 from litellm.proxy.hooks.model_max_budget_limiter import build_model_max_budget_usage
 from litellm.proxy.management.teams.authz import TEAM_ADMIN_ONLY, TEAM_OR_ORG_ADMIN, is_team_admin
@@ -445,6 +445,7 @@ _KEY_METADATA_REQUEST_FIELDS: Final = frozenset(
 
 
 _DECODED_JSON: Final = TypeAdapter(object)
+_HASHED_TOKEN: Final = re.compile(r"[0-9a-f]{64}")
 
 
 def _decode_json_string_column(column: str, value: object) -> object:
@@ -4894,10 +4895,6 @@ async def delete_key_fn(
                 },
             )
 
-        verbose_proxy_logger.debug(
-            "/keys/delete - cache after delete: %s", user_api_key_cache.key_object_cache.in_memory_cache.cache_dict
-        )
-
         asyncio.create_task(
             KeyManagementEventHooks.async_key_deleted_hook(
                 data=data,
@@ -5838,7 +5835,7 @@ async def delete_verification_tokens(
         raise e
 
     await delete_cache_key_objects(
-        hashed_tokens=tuple(token for token in hashed_tokens if is_user_key_cache_key(token)),
+        hashed_tokens=tuple(token for token in hashed_tokens if _HASHED_TOKEN.fullmatch(token) is not None),
         user_api_key_cache=user_api_key_cache,
         proxy_logging_obj=proxy_logging_obj,
     )
